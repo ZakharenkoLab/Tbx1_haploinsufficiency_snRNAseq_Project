@@ -1,0 +1,135 @@
+---
+title: "Flocculus Bone Single-Cell RNA-seq Analysis"
+author: "Yiran Li"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r load libraries}
+library(Seurat)
+library(SingleCellExperiment)
+library(tidyverse)
+library(Matrix)
+source('./scripts/functions.r')
+set.seed(1234)
+```
+
+```{r load data}
+#seurat<-subset(seurat, short_name %in% c('CT1','CT2','CT3','CP1','CP2','CP3','CP4','CP5','CP6','Osteoblasts','hypertrophic chondrocyte/Osteoblasts','Osteoclast','Matured osteoblasts/osteocyte','Matured chondrocyte') )
+#seurat<-seurat_norm_dimreduc(seurat)
+seurat<-readRDS('./results/seurat_chondro_osteo.rds')
+```
+```{r findmarkers cluster}
+all.markers <- FindAllMarkers(seurat, only.pos = TRUE,logfc.threshold = 0.5,min.pct = 0.4,test.use = "wilcox")
+write.csv(all.markers,'./results/bone_cluster_markers.csv')
+```
+```{r findmarkers celltype}
+Idents(seurat)<-seurat$celltype_main2
+all.markers <- FindAllMarkers(seurat, only.pos = TRUE,logfc.threshold = 0.5,min.pct = 0.4,test.use = "wilcox")
+write.csv(all.markers,'./results/bone_celltype1_markers.csv')
+```
+```{r condition marker}
+library(ggrepel)
+DE<-DE_calculate(testseu = seurat,group='group',cluster = 'celltype_main2')
+DE<-DE_annotation(DE)
+write.csv(DE,'./results/bone_group_DEG_by_celltype.csv')
+g<-DE_manhattan_plot(DE,colors = 'black')
+ggsave(filename = './plot/bone_condition_manha.pdf',plot = g,width = 15,height = 10)
+```
+
+```{r population abunance analysis milo}
+run_milo<-function(seurat){
+  library(miloR)
+  sce <- as.SingleCellExperiment(seurat)
+  milo.obj <- Milo(sce )
+  milo.obj <- buildGraph(milo.obj, k = 100, d = 30, reduced.dim = "PCA")
+  milo.obj <- makeNhoods(milo.obj, prop = 0.05, k = 100, d=30, refined = TRUE, reduced_dims = "PCA")
+  milo.obj <- countCells(milo.obj, meta.data = as.data.frame(colData(milo.obj)), sample="sample_id")
+  head(nhoodCounts(milo.obj))
+  design <- data.frame(colData(milo.obj))[,c("group","sample_id")]
+  design$group <- as.factor(design$group) 
+  design <- distinct(design)
+  rownames(design) <- design$sample_id
+  design$sample_id<-NULL
+  milo.obj <- calcNhoodDistance(milo.obj, d=30, reduced.dim = "PCA")
+  da_results <- testNhoods(milo.obj, design = ~ group, design.df = design)
+  return(list(milo.obj ,da_results ))
+}
+out<-run_milo(seurat)
+milo.obj<-out[[1]]
+da_results<-out[[2]]
+milo.obj <- buildNhoodGraph(milo.obj)
+saveRDS(milo.obj,'./results/milo.obj.rds')
+library(scater)
+library(patchwork)
+g<-plotUMAP(milo.obj, colour_by="celltype_main1") + plotNhoodGraphDA(milo.obj, da_results, alpha=1) +
+  plot_layout(guides="auto" )+scale_color_gradient2(low='blue',high='red')
+ggsave(filename = './plot/bone_condition_manha.png',plot = g,width = 15,height = 7)
+```
+
+
+```{r population abunance analysis dcats}
+library(DCATS)
+seurat$tmp_group <- ifelse(seurat$celltype_main1 %in% c('Chondroctye progenitors', 'Connective tissue cells', 'chondro'), 
+                           'chondro', 
+                           ifelse(seurat$celltype_main1 %in% c('hypertrophic chondrocyte/Osteoblasts', 'Matured osteoblasts', 'Osteoblasts'), 
+                                  'osteo', 
+                                  'others'))
+seurat<-subset(seurat,tmp_group!='others')
+
+knn_mat = knn_simMat(seurat@graphs$RNA_snn, seurat$short_name)
+count_mat = table(seurat$sample_id, seurat$short_name)
+design_mat = data.frame(condition = c("MUT", "MUT", "WT", "WT"))
+result<-dcats_GLM(count_mat, design_mat, similarity_mat = knn_mat)
+df<-data.frame('ceoffs'=as.numeric(result$ceoffs),'FDR'=as.numeric(result$fdr))
+rownames(df)<-rownames(result$ceoffs)
+df$celltype<-rownames(df)
+head(df)
+g<-df %>% ggplot(aes(x=-ceoffs,y=-log10(FDR),label=celltype))+geom_point()+geom_text_repel()+xlim(-2,2)+theme_classic()+geom_hline(yintercept = -log10(0.1))+geom_vline(xintercept = 0)+ylim(0,3)
+ggsave(filename = './plot/bone_dcats_main2.pdf',plot = g,width = 7,height = 7)
+write.csv(df,'./plot/osteo_chondro_short_name_all.csv')
+```
+
+```{r pseudobulk}
+library(scater)
+se<-as.SingleCellExperiment(sec,assay = 'RNA')
+colLabels(se)<-se$sample_id
+summed <- aggregateAcrossCells(se,  id=colData(se)[,c("group",'celltype_main1', "sample_id")])
+library(edgeR)
+y <- DGEList(round(counts(summed),0), samples=colData(summed))
+
+discarded <- summed$ncells < 10
+y <- y[,!discarded]
+summary(discarded)
+keep <- filterByExpr(y, group=summed$group)
+y <- y[keep,]
+summary(keep)
+y <- calcNormFactors(y)
+y$samples
+plotMDS(cpm(y, log=TRUE), 
+        col=ifelse(y$samples$group=='MUT', "red", "blue"))
+design <- model.matrix(~0+ factor(batch)+factor(group)+factor(celltype_main1), y$samples)
+design
+y <- estimateDisp(y, design)
+summary(y$trended.dispersion)
+fit <- glmQLFit(y, design, robust=TRUE)
+summary(fit$var.prior)
+summary(fit$df.prior)
+res <- glmQLFTest(fit, coef=ncol(design))
+summary(decideTests(res))
+df<-res$table
+df$gene<-rownames(df)
+df$p.adjust<-p.adjust(df$PValue)
+df %>% as.data.frame() %>% ggplot(aes(x=logFC,y=-log10(PValue)))+geom_point()
+##plot
+g<-plotExpression(logNormCounts(summed),
+                  features=c('Tbx1','Spp1','Otor','Runx2','Mia','Apoe'),
+                  x="group", colour_by="sample_id",ncol=3) 
+ggsave( './plot/bone_pseudobulk_marker.pdf',plot = g3,width = 7,height = 7)
+```

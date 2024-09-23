@@ -1,0 +1,104 @@
+---
+title: "PF/F Single-Cell RNA-seq process"
+author: "Yiran Li"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    highlight: tango
+---
+
+
+# Load Required Libraries
+```{r load-libraries}
+library(Seurat)
+library(SingleCellExperiment)
+library(tidyverse)
+library(SoupX)
+library(Matrix)
+# Source custom functions
+source('./scripts/functions.r')
+# Set a random seed for reproducibility
+set.seed(1234)
+```
+# Data Processing Step1
+```{r process cellranger output}
+# Load and preprocess sample 
+input_PF_WT1<-'./common/Yiran/Project/TBX1/PF_WT1'
+input_PF_WT2<-'./common/Yiran/Project/TBX1/PF_WT2'
+input_PF_MUT1<-'./common/Yiran/Project/TBX1/PF_MUT1'
+input_PF_MUT1<-'./common/Yiran/Project/TBX1/PF_MUT2'
+
+#Create seurat object
+# Convert cell cycle genes to human
+s.genes <- convertgenes(cc.genes$s.genes, 'human')
+g2m.genes <- convertgenes(cc.genes$g2m.genes, 'human')
+
+# Filepaths for input data
+filepaths <- list(input_PF_WT1, input_PF_WT2, input_PF_MUT1, input_PF_MUT2)
+sample_names <- c("PF_WT1", "PF_WT2", "PF_MUT1", "PF_MUT2")
+
+# Preprocess and process Seurat objects
+seurat_objects <- lapply(filepaths, function(filepath) {
+  obj <- preprocess_10x_seurat_create(filepath = filepath, pipeline = 'cellranger')
+  seurat_process(obj)
+})
+
+# Assign to respective variables (optional, if you need named objects)
+names(seurat_objects) <- sample_names
+saveRDS(seurat_objects, file = './results/seurat_objects.rds')
+```
+
+# Data Processing Step2
+```{r remove ambient RNA}
+# Define function for creating SoupX processed Seurat objects
+process_soup <- function(filepath, seurat_obj, group, batch, sample_name) {
+  out <- make_soup(filepath, seurat_obj)
+  soup_obj <- CreateSeuratObject(counts = out)
+  soup_obj <- seurat_process(soup_obj)
+  soup_obj <- doublet_detect(soup_obj, sct = FALSE)
+  
+  # Add metadata
+  soup_obj$group <- group
+  soup_obj$batch <- batch
+  soup_obj$sample <- sample_name
+  
+  return(soup_obj)
+}
+
+# Filepaths and corresponding metadata
+soup_filepaths <- list(
+  path_WT1 = file.path(input_PF_WT1, "outs/raw_feature_bc_matrix/"),
+  path_WT2 = file.path(input_PF_WT2, "outs/raw_feature_bc_matrix/"),
+  path_MUT1 = file.path(input_PF_MUT1, "outs/raw_feature_bc_matrix/"),
+  path_MUT2 = file.path(input_PF_MUT2, "outs/raw_feature_bc_matrix/")
+)
+
+# Corresponding Seurat objects (from previous processing)
+seurat_objs <- seurat_objects
+
+# Metadata information
+groups <- list(WT1 = 'WT', WT2 = 'WT', MUT1 = 'MUT', MUT2 = 'MUT')
+batches <- list(WT1 = 'batch2', WT2 = 'batch2', MUT1 = 'batch2', MUT2 = 'batch2')
+sample_names <- list(WT1 = 'PF_WT1', WT2 = 'PF_WT2', MUT1 = 'PF_MUT1', MUT2 = 'PF_MUT2')
+
+# Process SoupX for each sample
+soup_objects <- mapply(process_soup, soup_filepaths, seurat_objs, groups, batches, sample_names, SIMPLIFY = FALSE)
+soup_objects <- lapply(soup_objects, function(seurat_obj) label_transfer(seurat_obj, ref))
+
+# Merge processed SoupX objects
+merged_soup <- merge(x = soup_objects[[1]], y = soup_objects[2:length(soup_objects)], add.cell.ids = names(soup_objects), merge.data = TRUE)
+merged_soup <- seurat_norm_dimreduc(merged_soup)
+
+
+
+# Save the final Seurat object and its metadata
+saveRDS(merged_soup, './results/seurat.rds')
+saveRDS(soup_objects, './results/soup_objects.rds')
+
+```
+
+

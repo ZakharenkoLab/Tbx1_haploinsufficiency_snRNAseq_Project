@@ -1,0 +1,194 @@
+---
+title: "Flocculus PF Single-Cell RNA-seq Plots"
+author: "Yiran Li"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r load libraries}
+library('Seurat')
+library('tidyverse')
+library('ggrepel')
+```
+
+```{r 01 atlas plot}
+meta<-read.csv('./results/seurat_meta.csv')
+meta2<-read.csv('./results/color_name_anno.csv')
+meta$celltype<-factor(meta$celltype,levels = unique(meta2$celltype),ordered = T)
+pal <- setNames(meta2$color,meta2$celltype)
+cell_id_show <- meta %>%
+  group_by(celltype) %>%
+  mutate(centroid_x = mean(UMAP1), centroid_y = mean(UMAP2)) %>%  # Calculate the centroid for each class
+  mutate(distance = sqrt((UMAP1 - centroid_x)^2 + (UMAP2 - centroid_y)^2)) %>%  # Calculate the distance of each point from its class centroid
+  filter(distance == min(distance)) %>%  # Keep only the sample closest to the centroid
+  select(cell_id,celltype)
+
+meta$show_id<-ifelse(meta$cell_id %in% cell_id_show$cell_id,'Y','N')
+
+g <- meta  %>%
+    ggplot(aes(x = UMAP1, y = UMAP2, color = celltype)) +
+    geom_point(size = 0.1) +
+    theme_classic() +
+    scale_color_manual(values = pal)  +
+    geom_text_repel(data = meta[meta$show_id == 'Y', ], aes(x = UMAP1, y = UMAP2, label = celltype, color = 'black'), size = 2, color = 'black') +
+    ggtitle('PF snRNA cell types') +
+    guides(color = guide_legend(override.aes = list(size = 4)))
+ggsave(filename ='./plot/PF_celltype_umap.pdf',width = 10,height = 5,plot = g)
+```
+
+
+```{r 02 top marker heatmap }
+markers<-read.csv('./result/PF_cluster_markers.csv')
+coding_genes<-read.table('./data/biomart_mu.txt') %>% filter(gene_biotype=='protein_coding') %>% pull(external_gene_name)
+pal <- setNames(meta2$color,meta2$celltype_main2)
+seurat$celltype<-factor(seurat$celltype_main2,levels = meta2$celltype_main2,ordered = TRUE)
+meta2_s<-meta2 %>% separate_rows(seurat_clusters,sep = ',')
+markers$cluster<-factor(markers$cluster,levels = meta2_s$seurat_clusters,ordered = TRUE)
+markers_plot<-markers %>% filter(gene %in% coding_genes) %>% arrange(cluster) %>% group_by(cluster)  %>% top_n(n=5,wt=avg_log2FC) %>% pull(gene) %>% unique()
+g<-seurat_plots(seurat,markers_plot,colors=c('grey','black'),plot = 'heatmap')
+ggsave(filename = './plot/PF_celltype_top5_marker_heatmap.png',plot = g,width = 17,height = 20)
+```
+```{r 03 selected marker vlnplot}
+levels<-c("RL.early","GNP","Diff.Granule Neuron","UBC/Granule","UBC","GABA.interneuron.progenitor","Diff.GABA.interneuron","GABA.interneuron","Astroglia","Oligodendrocyte","Meningeal","Immune","Endothelial", "Pericyte","Purkinje","Progenitors" )
+pal <- setNames(meta2$color,meta2$short_name)
+seurat$celltype<-factor(seurat$celltype,levels = levels,ordered = T)
+markers<-c('Sox6','Wls','Neurod1','Rbfox3','Lmx1a','Eomes','Pax3','Pax2','Slc1a3','Plp1','Col3a1','Cx3cr1','Flt1','Pdgfrb','Calb1','Meis2')
+g<-MySeuratWrappers::VlnPlot(seurat, features = markers,  
+                          stacked=T,
+                          pt.size=0,
+                          direction = "horizontal",
+                          x.lab = NULL, y.lab = NULL,group.by = 'celltype',cols = pal,adjust=2)+
+    theme(axis.text.x = element_text(size=7,angle = 90),axis.text.y = element_text(size=4))+scale_color_manual(values = pal)
+ggsave(filename = './plot/PF_selected_markers_vlnplot.pdf',plot = g,width = 7,height = 7)
+```
+```{r 04 proportion barplot}
+colors<-pal
+df<-meta %>% filter(celltype %in% names(colors))
+# Calculate the proportions
+proportions_df <- df  %>%
+  group_by(group, celltype) %>%
+  tally() %>%
+  group_by(group) %>%
+  mutate(proportion = n/sum(n)) %>%
+  arrange(group, celltype)
+proportions_df$celltype<-factor(proportions_df$celltype,levels = levels,ordered = T)
+#proportions_df$celltype_main2<-factor(proportions_df$celltype_main2,levels = meta2$celltype_main2)
+g1<-ggplot(proportions_df, aes(x = group, y = proportion, fill = celltype)) +
+  geom_bar(stat = "identity") +
+  ylab("Proportion") +
+  xlab("Group") +
+  ggtitle("Proportion of celltype by Group") +
+  theme_minimal()+scale_fill_manual(values = colors)
+ggsave(filename = './plot/celltype_proportion_filtered.pdf',plot = g1,width = 10,height = 7 )
+```
+```{r 04 proportion diff plot divergent plot}
+proportions_df <- meta  %>%
+  group_by(group, celltype_main2) %>%
+  tally() %>%
+  group_by(group) %>%
+  mutate(proportion = n/sum(n)) %>%
+  arrange(group, celltype_main2)
+diff_df <- proportions_df %>%
+  spread(group, proportion) %>%
+  group_by(celltype_main2) %>%
+  summarise(WT = sum(WT, na.rm = TRUE), MUT = sum(MUT, na.rm = TRUE)) %>%
+  mutate(difference = MUT - WT) %>%
+  arrange(-difference)
+g<-ggplot(diff_df, aes(x = reorder(celltype_main2, difference), y = difference,fill=celltype_main2)) +
+  geom_bar(stat = "identity") +
+  xlab("celltype main2") +
+  ylab("Proportion Difference") +
+  ggtitle("Difference in Proportions Between MUT and WT (MUT-WT)") +
+  theme_classic() +
+  coord_flip()+scale_fill_manual(values = pal)
+ggsave(filename = './plot/celltype_main_proportion_PF.pdf',plot = g,width = 9,height = 6 )
+```
+
+
+
+```{r 04 proportion diff plot on UMAP}
+proportions_df <- meta  %>%
+  group_by(group,batch, celltype) %>%
+  tally() %>%
+  group_by(group,batch) %>%
+  mutate(proportion = n/sum(n)) %>%
+  arrange(group, celltype)
+
+diff_df <- proportions_df %>%
+  spread(group, proportion) %>%
+  group_by(celltype) %>%
+  summarise(WT = mean(WT, na.rm = TRUE), MUT = mean(MUT, na.rm = TRUE)) %>%
+  mutate(difference = MUT - WT) %>%
+  arrange(-difference)
+
+meta<-left_join(meta,diff_df[,c('celltype','difference')],by='celltype')
+g3<-ggplot(meta,aes(x=UMAP1,y=UMAP2,color=difference)) +
+    geom_point(size=0.1) +
+    scale_color_gradient2(
+        name = "Difference",
+        low = "blue",
+        mid = "white",
+        high = "red",
+        midpoint = 0,
+        guide = "colourbar",limits=c(-0.03,0.03) # set the same color range as bone c(-0.03402092,0.03488944)
+    ) +
+    theme_classic() +
+    theme(
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    )
+
+ggsave(filename = './plot/PF_diff_UMAP2.pdf',plot = g3,width = 7,height = 7 )
+```
+
+```{r ratio plot}
+#01GN
+data <- proportions_df %>% filter(celltype %in% c('GNP','Diff.Granule Neuron')) %>%
+  mutate(category = ifelse(celltype %in% c('GNP'), "GNP", "Diff.Granule")) %>% group_by(batch, category,group) %>%
+  summarise(total_proportion = sum(proportion), .groups = 'drop')
+# Spread the data for easy calculation of the ratio
+spread_data <- data %>%
+  pivot_wider(names_from = category, values_from = total_proportion) %>% mutate(ratio = GNP / Diff.Granule) %>% group_by(batch) %>% mutate(normalized_ratio = ratio / ratio[group == "WT"]) %>% ungroup()
+
+#02GABA
+data <- proportions_df %>% filter(celltype %in% c('Diff.GABA.interneuron','GABA.interneuron.progenitor','GABA.interneuron')) %>%
+  mutate(category = ifelse(celltype %in% c('GABA.interneuron.progenitor'), "GABA.pro.", "Diff.GABA")) %>% group_by(batch, category,group) %>%
+  summarise(total_proportion = sum(proportion), .groups = 'drop')
+# Spread the data for easy calculation of the ratio
+spread_data <- data %>%
+  pivot_wider(names_from = category, values_from = total_proportion) %>% mutate(ratio = GABA.pro. / Diff.GABA) %>% group_by(batch) %>%
+  mutate(normalized_ratio = ratio / ratio[group == "WT"]) %>%
+  ungroup()
+
+#03GN/GABA
+data <- proportions_df %>% filter(celltype %in% c('Diff.GABA.interneuron','GABA.interneuron.progenitor','GABA.interneuron','GNP','Diff.Granule Neuron','UBC','UBC/Granule','RL.early')) %>%
+  mutate(category = ifelse(celltype %in% c('Diff.GABA.interneuron','GABA.interneuron.progenitor','GABA.interneuron'), "GABAergic", "Glutamatergic")) %>% group_by(batch, category,group) %>%
+  summarise(total_proportion = sum(proportion), .groups = 'drop')
+# Spread the data for easy calculation of the ratio
+spread_data <- data %>%
+  pivot_wider(names_from = category, values_from = total_proportion) %>% mutate(ratio = GABAergic / Glutamatergic) %>% group_by(batch) %>%
+  mutate(normalized_ratio = ratio / ratio[group == "WT"]) %>%
+  ungroup()
+
+# Display the resulting data with ratios
+spread_data$group<-factor(spread_data$group,levels = c('WT','MUT'))
+g<-spread_data %>% 
+  ggplot(aes(x = group, y = normalized_ratio, group = batch, color = batch)) +
+  geom_point(size=4) +
+  geom_line(aes(group = batch), linewidth = 0.7) +
+  scale_color_manual(values = c('batch1' = '#03045e', 'batch2' = '#00b4d8')) +
+  theme_classic() +
+  scale_y_continuous(breaks = c(0.5, 1, 1.5), limits = c(0.5,1.5))+ylab('Normalized ratio')
+ggsave(filename = './plot/PF_ratio_GABA_GLU.pdf',plot = g,width = 5,height = 5)
+
+```

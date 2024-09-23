@@ -1,0 +1,298 @@
+---
+title: "Flocculus Bone Single-Cell RNA-seq Plots"
+author: "Yiran Li"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r load libraries}
+library('Seurat')
+library('tidyverse')
+library('ggrepel')
+```
+
+```{r 01 atlas plot}
+meta<-read.csv('./results/seurat_meta.csv')
+meta2<-read.csv('./results/color_name_anno.csv')
+meta$short_name<-factor(meta$short_name,levels = unique(meta2$short_name),ordered = T)
+pal <- setNames(meta2$color,meta2$short_name)
+cell_id_show <- meta %>%
+  group_by(short_name) %>%
+  mutate(centroid_x = mean(UMAP1), centroid_y = mean(UMAP2)) %>%  # Calculate the centroid for each class
+  mutate(distance = sqrt((UMAP1 - centroid_x)^2 + (UMAP2 - centroid_y)^2)) %>%  # Calculate the distance of each point from its class centroid
+  filter(distance == min(distance)) %>%  # Keep only the sample closest to the centroid
+  select(cell_id,short_name)
+
+meta$show_id<-ifelse(meta$cell_id %in% cell_id_show$cell_id,'Y','N')
+
+g <- meta  %>%
+    ggplot(aes(x = UMAP1, y = UMAP2, color = short_name)) +
+    geom_point(size = 0.1) +
+    theme_classic() +
+    scale_color_manual(values = pal)  +
+    geom_text_repel(data = meta[meta$show_id == 'Y', ], aes(x = UMAP1, y = UMAP2, label = short_name, color = 'black'), size = 2, color = 'black') +
+    ggtitle('Bone snRNA cell types') +
+    guides(color = guide_legend(override.aes = list(size = 4)))
+ggsave(filename ='./plot/bone_celltype_umap.pdf',width = 10,height = 5,plot = g)
+```
+
+
+```{r 02 top marker heatmap }
+markers<-read.csv('./result/bone_cluster_markers.csv')
+coding_genes<-read.table('./data/biomart_mu.txt') %>% filter(gene_biotype=='protein_coding') %>% pull(external_gene_name)
+pal <- setNames(meta2$color,meta2$celltype_main2)
+seurat$celltype<-factor(seurat$celltype_main2,levels = meta2$celltype_main2,ordered = TRUE)
+meta2_s<-meta2 %>% separate_rows(seurat_clusters,sep = ',')
+markers$cluster<-factor(markers$cluster,levels = meta2_s$seurat_clusters,ordered = TRUE)
+markers_plot<-markers %>% filter(gene %in% coding_genes) %>% arrange(cluster) %>% group_by(cluster)  %>% top_n(n=5,wt=avg_log2FC) %>% pull(gene) %>% unique()
+g<-seurat_plots(seurat,markers_plot,colors=c('grey','black'),plot = 'heatmap')
+ggsave(filename = './plot/bone_celltype_top5_marker_heatmap.png',plot = g,width = 17,height = 20)
+```
+```{r 03 selected marker vlnplot}
+pal <- setNames(meta2$color,meta2$celltype_main2)
+seurat$celltype<-factor(seurat$celltype_main2,levels = meta2$celltype_main2,ordered = T)
+markers<-c('Vcan','Otor','Col2a1','Acan','Hapln1','Mmp13','Sp7','Alpl','Dmp1','Acp5','Ctsk','Runx2','Col1a1','Spp1')
+g<-MySeuratWrappers::VlnPlot(seurat, features = markers,  
+                          stacked=T,
+                          pt.size=0,
+                          direction = "vertical",
+                          x.lab = NULL, y.lab = NULL,group.by = 'celltype',cols = pal,adjust=2)+
+    theme(axis.text.x = element_text(size=7,angle = 70),axis.text.y = element_text(size=4))+scale_color_manual(values = pal)
+ggsave(filename = './plot/bone_selected_markers_vlnplot.pdf',plot = g,width = 7,height = 7)
+```
+```{r 04 proportion barplot stack}
+colors<-c('Connective tissue cells'='#6f1d1b','Chondroctye progenitors'='orange','Matured chondrocyte'='#532b88','hypertrophic chondrocyte/Osteoblasts'='#90e0ef','Osteoblasts'='#00b4d8','Matured osteoblasts'='#023e8a','Osteoclast'='#c1121f')
+df<-meta %>% filter(celltype_main1 %in% names(colors))
+# Calculate the proportions
+proportions_df <- df  %>%
+  group_by(group, celltype_main1) %>%
+  tally() %>%
+  group_by(group) %>%
+  mutate(proportion = n/sum(n)) %>%
+  arrange(group, celltype_main1)
+proportions_df$celltype_main1<-factor(proportions_df$celltype_main1,levels = names(colors),ordered = T)
+#proportions_df$celltype_main2<-factor(proportions_df$celltype_main2,levels = meta2$celltype_main2)
+g1<-ggplot(proportions_df, aes(x = group, y = proportion, fill = celltype_main1)) +
+  geom_bar(stat = "identity") +
+  ylab("Proportion") +
+  xlab("Group") +
+  ggtitle("Proportion of celltype main1 by Group") +
+  theme_minimal()+scale_fill_manual(values = colors)
+write.csv(proportions_df,'./plot/celltype_main1_proportion_filtered.csv')
+ggsave(filename = './plot/celltype_main1_proportion_filtered.pdf',plot = g1,width = 10,height = 7 )
+```
+```{r 04 proportion diff plot divergent plot}
+proportions_df <- meta  %>%
+  group_by(group, celltype_main2) %>%
+  tally() %>%
+  group_by(group) %>%
+  mutate(proportion = n/sum(n)) %>%
+  arrange(group, celltype_main2)
+diff_df <- proportions_df %>%
+  spread(group, proportion) %>%
+  group_by(celltype_main2) %>%
+  summarise(WT = sum(WT, na.rm = TRUE), MUT = sum(MUT, na.rm = TRUE)) %>%
+  mutate(difference = MUT - WT) %>%
+  arrange(-difference)
+g<-ggplot(diff_df, aes(x = reorder(celltype_main2, difference), y = difference,fill=celltype_main2)) +
+  geom_bar(stat = "identity") +
+  xlab("celltype main2") +
+  ylab("Proportion Difference") +
+  ggtitle("Difference in Proportions Between MUT and WT (MUT-WT)") +
+  theme_classic() +
+  coord_flip()+scale_fill_manual(values = pal)
+ggsave(filename = './plot/celltype_main_proportion_bone.pdf',plot = g,width = 9,height = 6 )
+```
+
+```{r 04-1 proportion barplot with batch stack}
+proportions_df <- df  %>%
+  group_by(group,batch, celltype_main1) %>%
+  tally() %>%
+  group_by(group,batch) %>%
+  mutate(proportion = n/sum(n)) %>%
+  arrange(group, celltype_main1)
+proportions_df$celltype_main1<-factor(proportions_df$celltype_main1,levels = names(colors),ordered = T)
+proportions_df$group<-factor(proportions_df$group,levels = c('WT','MUT'))
+g1<-ggplot(proportions_df, aes(x = group, y = proportion, fill = celltype_main1)) +
+  geom_bar(stat = "identity") +
+  ylab("Proportion") +
+  xlab("Group") +
+  geom_text(aes(label = round(proportion, 2)), # Adjust the rounding as needed
+            position = position_stack(vjust = 0.5), # Adjust text position
+            color = "black", # Change text color if needed
+            size = 3) + # Adjust text size if needed
+  ggtitle("Proportion of celltype main1 by Group") +
+  theme_minimal()+scale_fill_manual(values = colors)+facet_grid(.~batch)
+
+ggsave(filename = './plot/celltype_main1_proportion_filtered_batch.pdf',plot = g1,width = 10,height = 7 )
+```
+
+
+```{r 04 proportion diff plot on UMAP}
+proportions_df <- meta  %>%
+  group_by(group,batch, short_name) %>%
+  tally() %>%
+  group_by(group,batch) %>%
+  mutate(proportion = n/sum(n)) %>%
+  arrange(group, short_name)
+
+diff_df <- proportions_df %>%
+  spread(group, proportion) %>%
+  group_by(short_name) %>%
+  summarise(WT = mean(WT, na.rm = TRUE), MUT = mean(MUT, na.rm = TRUE)) %>%
+  mutate(difference = MUT - WT) %>%
+  arrange(-difference)
+
+meta<-left_join(meta,diff_df[,c('short_name','difference')],by='short_name')
+g3<-ggplot(meta,aes(x=UMAP1,y=UMAP2,color=difference)) +
+    geom_point(size=0.1) +
+    scale_color_gradient2(
+        name = "Difference",
+        low = "blue",
+        mid = "white",
+        high = "red",
+        midpoint = 0,
+        guide = "colourbar",limits=c(-0.03,0.03)
+    ) +
+    theme_classic() +
+    theme(
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    )
+
+ggsave(filename = './plot/bone_diff_UMAP2.pdf',plot = g3,width = 7,height = 7 )
+```
+
+```{r ratio plot}
+chondrocyte_types <- c("Chondroctye progenitors", "Connective tissue cells", "Matured chondrocyte")
+# Classify each cell type as either 'chondrocyte' or 'osteoblast'
+data <- proportions_df %>%
+  mutate(category = ifelse(celltype_main1 %in% chondrocyte_types, "chondrocyte", "osteoblast")) %>%group_by(batch, category,group) %>%
+  summarise(total_proportion = sum(proportion), .groups = 'drop')
+# Spread the data for easy calculation of the ratio
+spread_data <- data %>%
+  pivot_wider(names_from = category, values_from = total_proportion) %>% mutate(ratio = chondrocyte / osteoblast) %>% group_by(batch) %>%
+  mutate(normalized_ratio = ratio / ratio[group == "WT"]) %>%
+  ungroup()
+
+# Display the resulting data with ratios
+spread_data$group<-factor(spread_data$group,levels = c('WT','MUT'))
+g<-spread_data %>% 
+  ggplot(aes(x = group, y = normalized_ratio, group = batch, color = batch)) +
+  geom_point(size=4) +
+  geom_line(aes(group = batch), linewidth = 0.7) +
+  scale_color_manual(values = c('batch1' = '#03045e', 'batch2' = '#00b4d8')) +
+  theme_classic() +
+  scale_y_continuous(breaks = c(0.5, 1, 1.5), limits = c(0.5,1.5))+ylab('Normalized ratio')
+ggsave(filename = './plot/bone_ratio.pdf',plot = g,width = 5,height = 5)
+
+```
+
+```{r ratio plot}
+#a
+data <- proportions_df %>% filter(celltype_main1 %in% c('Connective tissue cells','Chondroctye progenitors','hypertrophic chondrocyte/Osteoblasts')) %>%
+  mutate(category = ifelse(celltype_main1 %in% c('hypertrophic chondrocyte/Osteoblasts'), "hyper", "CT_CP")) %>% group_by(batch, category,group) %>%
+  summarise(total_proportion = sum(proportion), .groups = 'drop')
+# Spread the data for easy calculation of the ratio
+spread_data <- data %>%
+  pivot_wider(names_from = category, values_from = total_proportion) %>% mutate(ratio = CT_CP/hyper ) %>% group_by(batch) %>% mutate(normalized_ratio = ratio / ratio[group == "WT"]) %>% ungroup()
+
+#b
+data <- proportions_df %>% filter(celltype_main1 %in% c('Connective tissue cells','Chondroctye progenitors','Osteoblasts')) %>%
+  mutate(category = ifelse(celltype_main1 %in% c('Osteoblasts'), "Osteoblast", "CT_CP")) %>% group_by(batch, category,group) %>%
+  summarise(total_proportion = sum(proportion), .groups = 'drop')
+# Spread the data for easy calculation of the ratio
+spread_data <- data %>%
+  pivot_wider(names_from = category, values_from = total_proportion) %>% mutate(ratio = CT_CP /Osteoblast ) %>% group_by(batch) %>% mutate(normalized_ratio = ratio / ratio[group == "WT"]) %>% ungroup()
+
+#c
+data <- proportions_df %>% filter(celltype_main1 %in% c('Connective tissue cells','Chondroctye progenitors','Matured osteoblasts')) %>%
+  mutate(category = ifelse(celltype_main1 %in% c('Matured osteoblasts'), "matured_osteo", "CT_CP")) %>% group_by(batch, category,group) %>%
+  summarise(total_proportion = sum(proportion), .groups = 'drop')
+# Spread the data for easy calculation of the ratio
+spread_data <- data %>%
+  pivot_wider(names_from = category, values_from = total_proportion) %>% mutate(ratio = CT_CP / matured_osteo ) %>% group_by(batch) %>% mutate(normalized_ratio = ratio / ratio[group == "WT"]) %>% ungroup()
+
+#d
+data <- proportions_df %>% filter(celltype_main1 %in% c('Connective tissue cells','Chondroctye progenitors','hypertrophic chondrocyte/Osteoblasts','Osteoblasts','Matured osteoblasts')) %>%
+  mutate(category = ifelse(celltype_main1 %in% c('Connective tissue cells','Chondroctye progenitors'), "CT_CP",'others')) %>% group_by(batch, category,group) %>%
+  summarise(total_proportion = sum(proportion), .groups = 'drop')
+# Spread the data for easy calculation of the ratio
+spread_data <- data %>%
+  pivot_wider(names_from = category, values_from = total_proportion) %>% mutate(ratio = CT_CP / others) %>% group_by(batch) %>% mutate(normalized_ratio = ratio / ratio[group == "WT"]) %>% ungroup()
+
+
+
+# Display the resulting data with ratios
+spread_data$group<-factor(spread_data$group,levels = c('WT','MUT'))
+g<-spread_data %>% 
+  ggplot(aes(x = group, y = normalized_ratio, group = batch, color = batch)) +
+  geom_point(size=4) +
+  geom_line(aes(group = batch), linewidth = 0.7) +
+  scale_color_manual(values = c('batch1' = '#03045e', 'batch2' = '#00b4d8')) +
+  theme_classic() +
+  scale_y_continuous(breaks = c(0.5, 1, 1.5), limits = c(0.5,1.6))+ylab('Normalized ratio')
+ggsave(filename = './plot/bone_ratio_d.pdf',plot = g,width = 5,height = 5)
+
+```
+
+
+
+```{r 05 others}
+#Tbx1 expression
+bone$Tbx1<-bone@assays$RNA@data['Tbx1',drop=T]
+bone$UMAP1<-bone@reductions$umap@cell.embeddings[,1,drop=TRUE]
+bone$UMAP2<-bone@reductions$umap@cell.embeddings[,2,drop=TRUE]
+g<-bone@meta.data %>% ggplot(aes(x=UMAP1,y=UMAP2,color=Tbx1))+geom_point(size=0.1)+facet_grid(.~group) +theme_classic()+scale_color_gradientn(colours  = c('lightgrey','blue'))
+ggsave(filename = './plot/bone_Tbx1_umap2.pdf',plot = g,width = 12,height = 7 )
+g<-DotPlot(bone,features = 'Tbx1',group.by = 'short_name')
+ggsave(filename = './plot/bone_Tbx1_dotplot2.pdf',plot = g,width = 10,height = 7 )
+g<-bone@meta.data %>% mutate(group=factor(bone$group,levels=c('WT','MUT'))) %>% group_by() %>% ggplot(aes(x=group,y=Tbx1,color=group))+geom_violin()+geom_jitter(width=0.2,size=0.1,alpha=0.3)+theme_classic()+scale_color_manual(values = c('blue','red'))
+ggsave(filename = './plot/bone_Tbx1_vlnplot.pdf',plot = g,width = 7,height = 4 )
+
+# Fetch the data for the gene of interest
+gene_of_interest <- "Tbx1"
+data <- FetchData(bone, vars = c("group",'short_name', gene_of_interest),slot = "data")
+# First, calculate the percentage of cells expressing the gene in each group
+percentage_data <- data %>%
+  group_by(group,short_name) %>%
+  summarize(total_cells = n(),
+            expressing_cells = sum(!!sym(gene_of_interest) > 0),
+            pct_cells = expressing_cells / total_cells * 100)
+percentage_data$id<-paste0(percentage_data$short_name,'_',percentage_data$short_name)
+
+# Then, calculate mean expression among expressed cells only, in each group
+mean_expression_data <- data %>%
+  #mutate(!!gene_of_interest := expm1(!!sym(gene_of_interest) )) %>%
+  #filter(!!sym(gene_of_interest) > 0) %>%
+  group_by(group,short_name) %>%
+  summarize(mean_expression = mean(!!sym(gene_of_interest), na.rm = TRUE))
+mean_expression_data$id<-paste0(mean_expression_data$short_name,'_',mean_expression_data$short_name)
+
+# Join the two datasets
+data_summary <- left_join(percentage_data, mean_expression_data, by = "id")
+data_summary$group<-factor(data_summary$group.x,levels = c('WT','MUT'))
+# Create the plot
+
+g<-ggplot(data_summary, aes(x = group.x, y = short_name.x)) +
+  geom_point(aes(size = pct_cells,color=mean_expression)) + 
+  geom_text(aes(label = paste0(round(pct_cells, 1), "%")), 
+            vjust = -1, 
+            hjust = 1) +  # Add percentage labels
+  theme_classic() +
+  labs(x = "",
+       y = "",
+       title = "Expression of Tbx1 in WT and MUT Groups")+
+  scale_color_gradient(low = "grey", high = "blue") 
+ggsave(filename = './plot/tbx1_perc.pdf',plot = g,width = 7,height = 7)
+```
